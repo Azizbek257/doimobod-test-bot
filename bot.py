@@ -1,122 +1,161 @@
-import os
-import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types, F
+import asyncio
+import io
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 
-# 1. BOT SOZLAMALARI (TOKEN VA KANAL ID)
-BOT_TOKEN = "7722744158:AAHwscR-u_M5gX-uLqYcWc76iG899M70Kno"  # Sizning bot tokeningiz
-CHANNEL_ID = "-1002364733353"  # Sizning telegram kanalingiz ID-si
-ADMIN_ID = 6363653198  # Sizning (ustozning) telegram ID-ingiz
+# --- TOKEN VA ADMIN ---
+TOKEN = "7759885145:AAFS1wbyM4lX6gWqMvG674g9mS-C6g379Yg"
+ADMIN_ID = 5410190204  # Sizning Telegram ID'ngiz
 
-# Loglarni sozlash
+# --- AIOGRAM INITIALIZATION (XATOSIZ VERSIYA) ---
+bot = Bot(token=TOKEN, default_req_options=Bot.Properties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-# Bot va Dispatcher obyektlarini yaratish
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# --- O'ZGARUVCHILARNI XOTIRADA SAQLASH ---
+# Haqiqiy loyihada bular bazada turadi, hozircha operativ xotirada
+CURRENT_TITUL = ""      # Masalan: "ABCDACBA..."
+STUDENT_RESULTS = {}    # {user_id: {"name": "...", "score": 15, "total": 30}}
 
-# Bazani vaqtincha xotirada saqlash
-active_tests = {}  # {test_kod: "to_g_ri_javoblar"}
-student_results = {}
+# --- STATES (FSM) ---
+class AdminStates(StatesGroup):
+    waiting_for_titul = State()
 
-# --- USTOZ QISMI (ADMIN) ---
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer(
-            "🌟 **Assalomu alaykum, Ustoz!**\n"
-            "Doimobod EDU test tekshirish tizimiga xush kelibsiz.\n\n"
-            "Yangi test kalitlarini kiritish uchun masalan:\n"
-            "`/yangi 1234*abcd...` ko'rinishida yuboring.\n"
-            "(1234 - test kodi, abcd... - to'g'ri javoblar)"
-        )
-    else:
-        await message.answer(
-            "👋 **Assalomu alaykum, talaba!**\n"
-            "Test topshirish botiga xush kelibsiz.\n\n"
-            "Javoblaringizni tekshirish uchun quyidagi formatda yuboring:\n"
-            "`TestKodi*Ism Familiya*Javoblar` (Masalan: `1234*Ali Valiyev*abcd...`)\n\n"
-            "⚠️ *Eslatma: Javoblarni kichik harflar bilan, probelsiz yozing.*"
-        )
+class StudentStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_answers = State()
 
-@dp.message(Command("yangi"))
-async def add_test_handler(message: types.Message):
+# --- ADMIN BUYRUQLARI ---
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
+        await message.reply("Siz admin emassiz!")
         return
     
-    try:
-        data = message.text.split(" ", 1)[1]
-        test_code, answers = data.split("*")
-        test_code = test_code.strip()
-        answers = answers.strip().lower()
+    text = (
+        "<b>Doimobod EDU - Admin Panel</b>\n\n"
+        "1. /set_titul - Yangi kalit (titul) kiritish\n"
+        "2. /get_results - Natijalarni fayl qilib yuklab olish\n"
+        "3. /clear_results - Natijalar bazasini tozalash\n\n"
+        f"Hozirgi faol kalit: <code>{CURRENT_TITUL if CURRENT_TITUL else 'Kiritilmagan'}</code>"
+    )
+    await message.reply(text)
+
+@dp.message(Command("set_titul"))
+async def set_titul_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await message.reply("Yangi kalitlarni shunday formatda yuboring (Masalan: ABCDACBA...):")
+    await state.set_state(AdminStates.waiting_for_titul)
+
+@dp.message(AdminStates.waiting_for_titul)
+async def set_titul_save(message: types.Message, state: FSMContext):
+    global CURRENT_TITUL
+    CURRENT_TITUL = message.text.strip().upper()
+    await state.clear()
+    await message.reply(f"Kalit muvaffaqiyatli saqlandi!\nJami savollar soni: {len(CURRENT_TITUL)} ta.")
+
+@dp.message(Command("get_results"))
+async def get_results_file(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    
+    if not STUDENT_RESULTS:
+        await message.reply("Hozircha hech kim test topshirmadi.")
+        return
+    
+    # Oddiy CSV/TXT formatda fayl yaratish (Excel tushunadigan format)
+    output = io.StringIO()
+    output.write("Ism;To'g'ri javoblar;Jami savollar\n")
+    
+    for res in STUDENT_RESULTS.values():
+        output.write(f"{res['name']};{res['score']};{res['total']}\n")
+    
+    # Faylni telegramga yuborish
+    file_data = output.getvalue().encode('utf-8')
+    output.close()
+    
+    document = types.BufferedInputFile(file_data, filename="natijalar.csv")
+    await message.reply_document(document, caption="Doimobod EDU test natijalari")
+
+@dp.message(Command("clear_results"))
+async def clear_results_cmd(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    global STUDENT_RESULTS
+    STUDENT_RESULTS.clear()
+    await message.reply("Barcha natijalar o'chirib tashlandi!")
+
+
+# --- TALABALAR BUYRUQLARI ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await message.reply("Doimobod EDU test tekshirish botiga xush kelibsiz!\n\nIltimos, ism va familiyangizni kiriting:")
+    await state.set_state(StudentStates.waiting_for_name)
+
+@dp.message(StudentStates.waiting_for_name)
+async def get_student_name(message: types.Message, state: FSMContext):
+    name = message.text.strip()
+    await state.update_data(student_name=name)
+    await message.reply(f"Rahmat, {name}.\n\nEndi javoblaringizni ketma-ket yuboring (Masalan: ABCD...):")
+    await state.set_state(StudentStates.waiting_for_answers)
+
+@dp.message(StudentStates.waiting_for_answers)
+async def check_answers(message: types.Message, state: FSMContext):
+    global STUDENT_RESULTS
+    if not CURRENT_TITUL:
+        await message.reply("Xatolik: Admin hali kalitlarni kiritgani yo'q! Keyinroq urinib ko'ring.")
+        await state.clear()
+        return
         
-        active_tests[test_code] = answers
-        await message.answer(f"✅ **Yangi test muvaffaqiyatli saqlandi!**\n🔑 KOD: `{test_code}`\n📊 Savollar soni: {len(answers)} ta.")
+    student_answers = message.text.strip().upper()
+    user_data = await state.get_data()
+    name = user_data.get("student_name")
+    
+    # Tekshirish logikasi
+    correct_count = 0
+    total_questions = len(CURRENT_TITUL)
+    
+    # Talaba kam yoki ko'p javob yuborgan bo'lsa ham solishtirish
+    for i in range(min(len(student_answers), total_questions)):
+        if student_answers[i] == CURRENT_TITUL[i]:
+            correct_count += 1
+            
+    # Natijani saqlash
+    STUDENT_RESULTS[message.from_user.id] = {
+        "name": name,
+        "score": correct_count,
+        "total": total_questions
+    }
+    
+    await state.clear()
+    
+    # Talabaga javobini qaytarish
+    await message.reply(
+        f"<b>Sizning natijangiz:</b>\n\n"
+        f"👤 O'quvchi: {name}\n"
+        f"✅ To'g'ri javoblar: {correct_count} ta\n"
+        f"📊 Umumiy savollar: {total_questions} ta\n"
+        f"📈 Foiz: {round((correct_count/total_questions)*100, 1)}%"
+    )
+    
+    # Adminga ham xabar yuborish
+    try:
+        await bot.send_message(
+            ADMIN_ID, 
+            f"🔔 <b>Yangi natija:</b>\n\n"
+            f"👤 {name} test topshirdi.\n"
+            f"🎯 Natija: {correct_count}/{total_questions}"
+        )
     except Exception:
-        await message.answer("❌ **Xatolik!** Format noto'g'ri. Quyidagicha yozing:\n`/yangi Kod*javoblar` (Masalan: `/yangi 1234*abcde`)")
+        pass
 
-# --- TALABALAR QISMI ---
-@dp.message(F.text.contains("*"))
-async def check_test_handler(message: types.Message):
-    try:
-        parts = message.text.split("*")
-        if len(parts) < 3:
-            await message.answer("❌ **Format noto'g'ri!**\nIltimos, `TestKodi*Ism Familiya*Javoblaringiz` shaklida yuboring.")
-            return
-            
-        test_code = parts[0].strip()
-        student_name = parts[1].strip()
-        student_answers = parts[2].strip().lower()
-        
-        if test_code not in active_tests:
-            await message.answer("❌ **Kechirasiz, bunday kodli test tizimda mavjud emas!**\nIltimos, kodni qayta tekshiring.")
-            return
-            
-        correct_answers = active_tests[test_code]
-        correct_count = 0
-        total_questions = len(correct_answers)
-        
-        for i in range(min(len(student_answers), total_questions)):
-            if student_answers[i] == correct_answers[i]:
-                correct_count += 1
-                
-        percentage = (correct_count / total_questions) * 100
-        
-        result_msg = (
-            f"📊 **Sizning Natijangiz:**\n\n"
-            f"👤 O'quvchi: **{student_name}**\n"
-            f"🔑 Test kodi: `{test_code}`\n"
-            f"✅ To'g'ri javoblar: {correct_count} ta\n"
-            f"❌ Noto'g'ri javoblar: {total_questions - correct_count} ta\n"
-            f"📈 Foiz: {percentage:.1f}%\n"
-        )
-        await message.answer(result_msg)
-        
-        # KANALGA NATIJANI YUBORISH
-        channel_msg = (
-            f"📢 **Yangi Natija (Test: {test_code})**\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 O'quvchi: **{student_name}**\n"
-            f"✅ Natija: {correct_count}/{total_questions} ta\n"
-            f"📈 Ko'rsatkich: {percentage:.1f}%\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 @Doimobod_EDU"
-        )
-        try:
-            await bot.send_message(chat_id=CHANNEL_ID, text=channel_msg)
-        except Exception as e:
-            logging.error(f"Kanalga yuborishda xatolik: {e}")
-            
-    except Exception as e:
-        await message.answer("❌ **Xatolik yuz berdi!** Ma'lumotlarni qayta tekshiring.")
-
+# --- MAIN ---
 async def main():
     print("Bot muvaffaqiyatli ishga tushdi...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
